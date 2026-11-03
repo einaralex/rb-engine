@@ -3,9 +3,18 @@ name = "rekordbox-to-engine"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+default = ["cli"]
+cli = ["dep:clap"]
+
+[[bin]]
+name = "rekordbox-to-engine"
+path = "src/main.rs"
+required-features = ["cli"]
+
 [dependencies]
 anyhow = "1"
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive"], optional = true }
 flate2 = "1"
 crc32fast = "1"
 serde = { version = "1", features = ["derive"] }
