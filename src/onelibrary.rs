@@ -1,11 +1,10 @@
 use crate::plan::SourceLibrary;
 use anyhow::{bail, Context, Result};
 use flate2::read::ZlibDecoder;
-use serde_json::Value;
+use rusqlite::{Connection, OpenFlags};
 use std::fs;
-use std::io::{Read, Write};
+use std::io::Read;
 use std::path::Path;
-use std::process::{Command, Stdio};
 
 const KEY_BLOB: &str =
     "PN_1dH8$oLJY)16j_RvM6qphWw`476>;C1cWmI#se(PG`j}~xAjlufj?`#0i{;=glh(SkW)y0>n?YEiD`l%t(";
@@ -39,20 +38,6 @@ fn derive_key() -> Result<String> {
     Ok(plain)
 }
 
-fn file_uri(path: &Path) -> Result<String> {
-    let absolute = path.canonicalize()?;
-    let mut encoded = String::from("file://");
-    for b in absolute.to_string_lossy().as_bytes() {
-        if b.is_ascii_alphanumeric() || b"/-._~".contains(b) {
-            encoded.push(*b as char);
-        } else {
-            encoded.push_str(&format!("%{b:02X}"));
-        }
-    }
-    encoded.push_str("?mode=ro&immutable=1");
-    Ok(encoded)
-}
-
 pub fn read_onelibrary(path: &Path) -> Result<SourceLibrary> {
     if !path.is_file() {
         bail!("Rekordbox exportLibrary.db is missing");
@@ -76,63 +61,34 @@ pub fn read_onelibrary(path: &Path) -> Result<SourceLibrary> {
             }
         }
     }
-    let key = derive_key()?.replace('\'', "''");
-    let sql = format!(
-        r#"PRAGMA cipher = sqlcipher;
-PRAGMA legacy = 4;
-PRAGMA key = '{key}';
-PRAGMA integrity_check;
-SELECT c.*, artist.name AS artistName, album.name AS albumName,
+    let db = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .context("cannot open Rekordbox OneLibrary")?;
+    db.execute_batch("PRAGMA cipher = sqlcipher; PRAGMA legacy = 4;")?;
+    db.pragma_update(None, "key", derive_key()?)?;
+    let integrity = crate::engine::sqlite_rows(&db, "PRAGMA integrity_check;")?;
+    if integrity[0]["integrity_check"] != "ok" {
+        bail!("OneLibrary integrity check failed");
+    }
+    let tracks = crate::engine::sqlite_rows(
+        &db,
+        r#"SELECT c.*, artist.name AS artistName, album.name AS albumName,
        genre.name AS genreName, label.name AS labelName
 FROM content c
 LEFT JOIN artist ON c.artist_id_artist = artist.artist_id
 LEFT JOIN album ON c.album_id = album.album_id
 LEFT JOIN genre ON c.genre_id = genre.genre_id
 LEFT JOIN label ON c.label_id = label.label_id
-ORDER BY c.content_id;
-SELECT playlist_id, name, attribute, playlist_id_parent, sequenceNo FROM playlist ORDER BY playlist_id;
-SELECT playlist_id, content_id, sequenceNo FROM playlist_content ORDER BY playlist_id, sequenceNo;
-SELECT key_id, name FROM "key" UNION ALL SELECT NULL, NULL WHERE NOT EXISTS(SELECT 1 FROM "key");
-SELECT image_id, path FROM image UNION ALL SELECT NULL, NULL WHERE NOT EXISTS(SELECT 1 FROM image);
-"#
-    );
-    let mut child = Command::new("sqlcipher")
-        .args(["-readonly", "-batch", "-bail", "-json", &file_uri(path)?])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .context("SQLCipher CLI is required to read Rekordbox OneLibrary")?;
-    child.stdin.take().unwrap().write_all(sql.as_bytes())?;
-    let output = child.wait_with_output()?;
-    if !output.status.success() {
-        bail!("SQLCipher could not read exportLibrary.db");
-    }
-    let arrays: Vec<Value> = serde_json::Deserializer::from_slice(&output.stdout)
-        .into_iter::<Value>()
-        .collect::<std::result::Result<_, _>>()?;
-    if arrays.len() != 7 {
-        bail!("unexpected OneLibrary query result count: {}", arrays.len());
-    }
-    if arrays[0]
-        .as_array()
-        .and_then(|rows| rows.first())
-        .and_then(|row| row.get("ok"))
-        .and_then(Value::as_str)
-        != Some("ok")
-        || arrays[1]
-            .as_array()
-            .and_then(|rows| rows.first())
-            .and_then(|row| row.get("integrity_check"))
-            .and_then(Value::as_str)
-            != Some("ok")
-    {
-        bail!("OneLibrary integrity check failed");
-    }
+ORDER BY c.content_id;"#,
+    )?;
+    let playlists = crate::engine::sqlite_rows(&db,
+        "SELECT playlist_id, name, attribute, playlist_id_parent, sequenceNo FROM playlist ORDER BY playlist_id;")?;
+    let playlist_entries = crate::engine::sqlite_rows(&db,
+        "SELECT playlist_id, content_id, sequenceNo FROM playlist_content ORDER BY playlist_id, sequenceNo;")?;
+    let keys = crate::engine::sqlite_rows(&db, "SELECT key_id, name FROM \"key\";")?;
+    let images = crate::engine::sqlite_rows(&db, "SELECT image_id, path FROM image;")?;
     let source = serde_json::json!({
-        "tracks": arrays[2], "playlists": arrays[3], "playlist_entries": arrays[4],
-        "keys": arrays[5].as_array().unwrap().iter().filter(|row| !row["key_id"].is_null()).collect::<Vec<_>>(),
-        "images": arrays[6].as_array().unwrap().iter().filter(|row| !row["image_id"].is_null()).collect::<Vec<_>>(),
+        "tracks": tracks, "playlists": playlists, "playlist_entries": playlist_entries,
+        "keys": keys, "images": images,
     });
     Ok(serde_json::from_value(source)?)
 }
@@ -142,5 +98,33 @@ mod tests {
     #[test]
     fn derives_known_key_prefix() {
         assert!(super::derive_key().unwrap().starts_with("r8gd"));
+    }
+
+    #[test]
+    fn reads_encrypted_onelibrary_without_external_sqlcipher() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("exportLibrary.db");
+        let db = rusqlite::Connection::open(&path).unwrap();
+        db.execute_batch("PRAGMA cipher = sqlcipher; PRAGMA legacy = 4;")
+            .unwrap();
+        db.pragma_update(None, "key", super::derive_key().unwrap())
+            .unwrap();
+        db.execute_batch(r#"CREATE TABLE content (content_id INTEGER, path TEXT, artist_id_artist INTEGER, album_id INTEGER, genre_id INTEGER, label_id INTEGER);
+CREATE TABLE artist (artist_id INTEGER, name TEXT);
+CREATE TABLE album (album_id INTEGER, name TEXT);
+CREATE TABLE genre (genre_id INTEGER, name TEXT);
+CREATE TABLE label (label_id INTEGER, name TEXT);
+CREATE TABLE playlist (playlist_id INTEGER, name TEXT, attribute INTEGER, playlist_id_parent INTEGER, sequenceNo INTEGER);
+CREATE TABLE playlist_content (playlist_id INTEGER, content_id INTEGER, sequenceNo INTEGER);
+CREATE TABLE "key" (key_id INTEGER, name TEXT);
+CREATE TABLE image (image_id INTEGER, path TEXT);
+INSERT INTO content (content_id,path) VALUES (42,'/Contents/song.wav');
+INSERT INTO playlist VALUES (7,'Set',0,NULL,1);
+INSERT INTO playlist_content VALUES (7,42,1);"#).unwrap();
+        drop(db);
+        let source = super::read_onelibrary(&path).unwrap();
+        assert_eq!(source.tracks[0].content_id, 42);
+        assert_eq!(source.playlists[0].name, "Set");
+        assert_eq!(source.playlist_entries[0].content_id, 42);
     }
 }

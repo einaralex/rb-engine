@@ -5,7 +5,7 @@
 ## Requirements
 
 - macOS with Engine DJ installed at `/Applications/Engine DJ.app` and its `OfflineAnalyzer` executable available.
-- Rust toolchain, `sqlcipher` CLI, and `sqlite3` CLI.
+- Rust toolchain to build from source. The executable includes its SQLCipher and SQLite dependencies; neither CLI is needed at runtime.
 - A fresh Rekordbox USB export containing `PIONEER/rekordbox/exportLibrary.db` and the referenced audio under `Contents`. Close Rekordbox before running the command. This version refuses a target that already has an `Engine Library` folder.
 
 ## Use
