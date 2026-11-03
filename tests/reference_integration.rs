@@ -1,5 +1,5 @@
 use anyhow::Result;
-use rb_engine::{
+use rekordbox_to_engine::{
     analyzer::Analyzer,
     capture::{decode_stream, Analysis},
     onelibrary::read_onelibrary,
@@ -28,14 +28,15 @@ impl Analyzer for CapturedAnalyzer {
 #[test]
 #[ignore = "requires a disposable copy of the three-track Rekordbox USB"]
 fn imports_three_track_reference_with_captured_packets() {
-    let target = PathBuf::from(std::env::var("RB_ENGINE_INTEGRATION_USB").unwrap());
+    let target = PathBuf::from(std::env::var("REKORDBOX_TO_ENGINE_INTEGRATION_USB").unwrap());
     assert!(target
         .to_string_lossy()
-        .starts_with("/private/tmp/rb-engine-integration-"));
+        .starts_with("/private/tmp/rekordbox-to-engine-integration-"));
     let source = read_onelibrary(&target.join("PIONEER/rekordbox/exportLibrary.db")).unwrap();
     let plan = build_plan(&target, source).unwrap();
     assert_eq!(plan.tracks.len(), 3);
-    let capture_root = PathBuf::from(std::env::var("RB_ENGINE_INTEGRATION_CAPTURES").unwrap());
+    let capture_root =
+        PathBuf::from(std::env::var("REKORDBOX_TO_ENGINE_INTEGRATION_CAPTURES").unwrap());
     let report = prepare(&plan, &CapturedAnalyzer, &capture_root).unwrap();
     assert!(report.verification.ok);
     assert_eq!(report.export.tracks, 3);

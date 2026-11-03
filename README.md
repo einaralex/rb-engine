@@ -1,6 +1,6 @@
-# rb-engine
+# rekordbox-to-engine
 
-`rb-engine` prepares a fresh Rekordbox USB export for Engine DJ players. It reads the modern Rekordbox OneLibrary database, runs the installed Engine DJ `OfflineAnalyzer` once per track, and writes an Engine Library beside the existing `PIONEER` and `Contents` folders. The current workflow is serial and uses an 88 BPM analyzer minimum.
+`rekordbox-to-engine` prepares a fresh Rekordbox USB export for Engine DJ players. It reads the modern Rekordbox OneLibrary database, runs the installed Engine DJ `OfflineAnalyzer` once per track, and writes an Engine Library beside the existing `PIONEER` and `Contents` folders. The current workflow is serial and uses an 88 BPM analyzer minimum.
 
 ## Requirements
 
@@ -9,6 +9,10 @@
 - A fresh Rekordbox USB export containing `PIONEER/rekordbox/exportLibrary.db` and the referenced audio under `Contents`. Close Rekordbox before running the command. This version refuses a target that already has an `Engine Library` folder.
 
 ## Use
+
+Install the command from this checkout with `cargo install --path . --locked`.
+It is installed as `rekordbox-to-engine`; scripts that invoked `rb-engine`
+need to use the new command name.
 
 From this repository, preview the tracks and playlists without writing to the USB:
 
@@ -35,12 +39,12 @@ cargo test --offline
 Normal tests use generated tiny files and three recorded analyzer packet streams, each below 1 MB. The ignored reference integration test can replay those streams against a **disposable** copy of the three-track Rekordbox export:
 
 ```sh
-RB_ENGINE_INTEGRATION_USB=/private/tmp/rb-engine-integration-example \
-RB_ENGINE_INTEGRATION_CAPTURES=/private/tmp/rb-engine-captures-example \
+REKORDBOX_TO_ENGINE_INTEGRATION_USB=/private/tmp/rekordbox-to-engine-integration-example \
+REKORDBOX_TO_ENGINE_INTEGRATION_CAPTURES=/private/tmp/rekordbox-to-engine-captures-example \
 cargo test --offline --test reference_integration -- --ignored
 ```
 
-The integration test refuses a target outside `/private/tmp/rb-engine-integration-*`. It requires an unmodified three-track stage-one USB copy with IDs 1, 2, and 3 and no Engine library. It writes an Engine library to that disposable copy.
+The integration test refuses a target outside `/private/tmp/rekordbox-to-engine-integration-*`. It requires an unmodified three-track stage-one USB copy with IDs 1, 2, and 3 and no Engine library. It writes an Engine library to that disposable copy.
 
 ## Current limits
 
