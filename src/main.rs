@@ -1,6 +1,6 @@
 use anyhow::{bail, Context, Result};
 use clap::Parser;
-use rb_engine::{
+use rekordbox_to_engine::{
     analyzer::OfflineAnalyzer, onelibrary::read_onelibrary, plan::build_plan, workflow::prepare,
 };
 use std::path::PathBuf;
@@ -9,7 +9,7 @@ use uuid::Uuid;
 
 #[derive(Parser)]
 #[command(
-    name = "rb-engine",
+    name = "rekordbox-to-engine",
     about = "Prepare a Rekordbox USB for Engine DJ players"
 )]
 struct Args {
@@ -58,7 +58,7 @@ fn main() -> Result<()> {
         idle_grace: Duration::from_secs(120),
     };
     let captures = args.capture_output_dir.unwrap_or_else(|| {
-        std::env::temp_dir().join(format!("rb-engine-captures-{}", Uuid::new_v4()))
+        std::env::temp_dir().join(format!("rekordbox-to-engine-captures-{}", Uuid::new_v4()))
     });
     let report = prepare(&plan, &analyzer, &captures)?;
     println!("{}", serde_json::to_string_pretty(&report)?);

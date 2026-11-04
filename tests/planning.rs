@@ -1,4 +1,4 @@
-use rb_engine::plan::{build_plan, SourceLibrary};
+use rekordbox_to_engine::plan::{build_plan, SourceLibrary};
 use serde_json::json;
 use std::fs;
 

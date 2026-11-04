@@ -1,5 +1,5 @@
 use anyhow::{bail, Result};
-use rb_engine::{
+use rekordbox_to_engine::{
     analyzer::Analyzer,
     capture::{decode_stream, Analysis},
     plan::{build_plan, SourceLibrary, TrackPlan},
@@ -21,7 +21,7 @@ impl Analyzer for FixtureAnalyzer {
     }
 }
 
-fn fixture_plan(target: &Path) -> rb_engine::plan::Plan {
+fn fixture_plan(target: &Path) -> rekordbox_to_engine::plan::Plan {
     let media = target.join("Contents/Test/short.wav");
     fs::create_dir_all(media.parent().unwrap()).unwrap();
     fs::write(media, b"tiny media stub").unwrap();

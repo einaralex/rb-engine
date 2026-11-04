@@ -548,7 +548,7 @@ pub(crate) fn write_engine_with_hashes(
     }
     let stage = plan
         .target
-        .join(format!(".rb-engine-stage-{}", Uuid::new_v4()));
+        .join(format!(".rekordbox-to-engine-stage-{}", Uuid::new_v4()));
     fs::create_dir(&stage)?;
     let result = (|| -> Result<ExportResult> {
         let uuid = Uuid::new_v4().to_string();
