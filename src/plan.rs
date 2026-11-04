@@ -187,12 +187,14 @@ pub fn build_plan(target: &Path, source: SourceLibrary) -> Result<Plan> {
         let image_path = row
             .image_id
             .and_then(|id| images.get(&id))
+            .filter(|s| !s.is_empty())
             .map(|s| usb_relative(s))
             .transpose()?
             .map(|s| target.join(s));
         let anlz_path = row
             .analysis_data_file_path
             .as_deref()
+            .filter(|s| !s.is_empty())
             .map(usb_relative)
             .transpose()?
             .map(|s| target.join(s));

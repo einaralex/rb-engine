@@ -3,6 +3,7 @@ use crate::capture::Analysis;
 use crate::plan::{Plan, TrackPlan};
 use anyhow::{bail, Context, Result};
 use flate2::{read::ZlibDecoder, write::ZlibEncoder, Compression};
+use rusqlite::{types::ValueRef, Connection, OpenFlags};
 use serde::Serialize;
 use sha1::{Digest as Sha1Digest, Sha1};
 use sha2::Sha256;
@@ -10,7 +11,6 @@ use std::collections::{BTreeMap, HashMap};
 use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
@@ -68,39 +68,44 @@ fn insert(table: &str, cells: &[(&str, String)]) -> String {
 }
 
 fn sqlite_script(path: &Path, sql: &str) -> Result<()> {
-    let mut child = Command::new("sqlite3")
-        .args(["-batch", "-bail"])
-        .arg(path)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .context("sqlite3 CLI is required to write Engine databases")?;
-    child.stdin.take().unwrap().write_all(sql.as_bytes())?;
-    let output = child.wait_with_output()?;
-    if !output.status.success() {
-        bail!(
-            "sqlite3 could not create {}: {}",
-            path.display(),
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
+    let db = Connection::open(path).with_context(|| format!("cannot create {}", path.display()))?;
+    db.execute_batch(sql)
+        .with_context(|| format!("cannot write {}", path.display()))?;
     Ok(())
 }
 
 fn sqlite_query(path: &Path, query: &str) -> Result<serde_json::Value> {
-    let output = Command::new("sqlite3")
-        .args(["-readonly", "-batch", "-bail", "-json"])
-        .arg(path)
-        .arg(query)
-        .output()?;
-    if !output.status.success() {
-        bail!("could not verify SQLite database {}", path.display());
+    let db = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .with_context(|| format!("cannot open {}", path.display()))?;
+    sqlite_rows(&db, query)
+}
+
+pub(crate) fn sqlite_rows(db: &Connection, query: &str) -> Result<serde_json::Value> {
+    let mut statement = db.prepare(query)?;
+    let names: Vec<String> = statement
+        .column_names()
+        .iter()
+        .map(|s| (*s).to_owned())
+        .collect();
+    let mut rows = statement.query([])?;
+    let mut result = Vec::new();
+    while let Some(row) = rows.next()? {
+        let mut object = serde_json::Map::new();
+        for (index, name) in names.iter().enumerate() {
+            let value = match row.get_ref(index)? {
+                ValueRef::Null => serde_json::Value::Null,
+                ValueRef::Integer(n) => serde_json::Value::from(n),
+                ValueRef::Real(n) => serde_json::Value::from(n),
+                ValueRef::Text(bytes) => serde_json::Value::from(std::str::from_utf8(bytes)?),
+                ValueRef::Blob(bytes) => {
+                    serde_json::Value::from(String::from_utf8_lossy(bytes).into_owned())
+                }
+            };
+            object.insert(name.clone(), value);
+        }
+        result.push(serde_json::Value::Object(object));
     }
-    if output.stdout.is_empty() {
-        return Ok(serde_json::Value::Array(Vec::new()));
-    }
-    Ok(serde_json::from_slice(&output.stdout)?)
+    Ok(serde_json::Value::Array(result))
 }
 
 fn qcompress(raw: &[u8]) -> Result<Vec<u8>> {
