@@ -3,6 +3,7 @@ use crate::capture::Analysis;
 use crate::plan::{Plan, TrackPlan};
 use anyhow::{bail, Context, Result};
 use flate2::{read::ZlibDecoder, write::ZlibEncoder, Compression};
+use rusqlite::{types::ValueRef, Connection, OpenFlags};
 use serde::Serialize;
 use sha1::{Digest as Sha1Digest, Sha1};
 use sha2::Sha256;
@@ -10,13 +11,13 @@ use std::collections::{BTreeMap, HashMap};
 use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
 const MAIN_SCHEMA: &str = include_str!("../sql/m.sql");
 const HISTORY_SCHEMA: &str = include_str!("../sql/hm.sql");
 const SECONDARY_SCHEMA: &str = include_str!("../sql/secondary.sql");
+const PREVIOUS_LIBRARY: &str = ".rekordbox-to-engine-previous";
 
 #[derive(Debug, Serialize)]
 pub struct ExportResult {
@@ -68,39 +69,44 @@ fn insert(table: &str, cells: &[(&str, String)]) -> String {
 }
 
 fn sqlite_script(path: &Path, sql: &str) -> Result<()> {
-    let mut child = Command::new("sqlite3")
-        .args(["-batch", "-bail"])
-        .arg(path)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .context("sqlite3 CLI is required to write Engine databases")?;
-    child.stdin.take().unwrap().write_all(sql.as_bytes())?;
-    let output = child.wait_with_output()?;
-    if !output.status.success() {
-        bail!(
-            "sqlite3 could not create {}: {}",
-            path.display(),
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
+    let db = Connection::open(path).with_context(|| format!("cannot create {}", path.display()))?;
+    db.execute_batch(sql)
+        .with_context(|| format!("cannot write {}", path.display()))?;
     Ok(())
 }
 
 fn sqlite_query(path: &Path, query: &str) -> Result<serde_json::Value> {
-    let output = Command::new("sqlite3")
-        .args(["-readonly", "-batch", "-bail", "-json"])
-        .arg(path)
-        .arg(query)
-        .output()?;
-    if !output.status.success() {
-        bail!("could not verify SQLite database {}", path.display());
+    let db = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .with_context(|| format!("cannot open {}", path.display()))?;
+    sqlite_rows(&db, query)
+}
+
+pub(crate) fn sqlite_rows(db: &Connection, query: &str) -> Result<serde_json::Value> {
+    let mut statement = db.prepare(query)?;
+    let names: Vec<String> = statement
+        .column_names()
+        .iter()
+        .map(|s| (*s).to_owned())
+        .collect();
+    let mut rows = statement.query([])?;
+    let mut result = Vec::new();
+    while let Some(row) = rows.next()? {
+        let mut object = serde_json::Map::new();
+        for (index, name) in names.iter().enumerate() {
+            let value = match row.get_ref(index)? {
+                ValueRef::Null => serde_json::Value::Null,
+                ValueRef::Integer(n) => serde_json::Value::from(n),
+                ValueRef::Real(n) => serde_json::Value::from(n),
+                ValueRef::Text(bytes) => serde_json::Value::from(std::str::from_utf8(bytes)?),
+                ValueRef::Blob(bytes) => {
+                    serde_json::Value::from(String::from_utf8_lossy(bytes).into_owned())
+                }
+            };
+            object.insert(name.clone(), value);
+        }
+        result.push(serde_json::Value::Object(object));
     }
-    if output.stdout.is_empty() {
-        return Ok(serde_json::Value::Array(Vec::new()));
-    }
-    Ok(serde_json::from_slice(&output.stdout)?)
+    Ok(serde_json::Value::Array(result))
 }
 
 fn qcompress(raw: &[u8]) -> Result<Vec<u8>> {
@@ -164,6 +170,109 @@ fn hash_file(path: &Path) -> Result<String> {
         hasher.update(&buf[..n]);
     }
     Ok(hex::encode(hasher.finalize()))
+}
+
+fn entry_type(path: &Path) -> Result<Option<fs::FileType>> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => Ok(Some(metadata.file_type())),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error).with_context(|| format!("cannot inspect {}", path.display())),
+    }
+}
+
+fn companion_has_user_rows(path: &Path) -> Result<bool> {
+    let db = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .with_context(|| format!("cannot inspect {}", path.display()))?;
+    let mut stmt = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT IN ('Information', 'sqlite_sequence')")?;
+    let names = stmt
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for name in names {
+        let escaped = name.replace('"', "\"\"");
+        let count: i64 =
+            db.query_row(&format!("SELECT COUNT(*) FROM \"{escaped}\""), [], |row| {
+                row.get(0)
+            })?;
+        if count != 0 {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Only a library created by this tool, with its main database unchanged,
+/// may be refreshed. An interrupted swap is recovered before planning.
+pub fn validate_existing(target: &Path) -> Result<()> {
+    let root = target.join("Engine Library");
+    let previous = target.join(PREVIOUS_LIBRARY);
+    if let Some(file_type) = entry_type(&previous)? {
+        if !file_type.is_dir() || entry_type(&root)?.is_some() {
+            bail!(
+                "an interrupted Engine Library refresh needs manual recovery: {}",
+                previous.display()
+            );
+        }
+        fs::rename(&previous, &root).context("could not restore the previous Engine Library")?;
+    }
+    let Some(file_type) = entry_type(&root)? else {
+        return Ok(());
+    };
+    if !file_type.is_dir() {
+        bail!("Engine Library is not a directory; refusing to replace it");
+    }
+    let state: serde_json::Value = serde_json::from_slice(
+        &fs::read(root.join(".engine-usb.json"))
+            .context("existing Engine Library is not managed by rekordbox-to-engine")?,
+    )
+    .context("existing Engine Library has an invalid management record")?;
+    if state["format"] != "engine-usb-v1" {
+        bail!("existing Engine Library has an unknown format; refusing to replace it");
+    }
+    let expected = state["database_sha256"]
+        .as_str()
+        .context("existing Engine Library has no database checksum")?;
+    let actual = hash_file(&root.join("Database2/m.db"))
+        .context("cannot read the existing Engine database")?;
+    if actual != expected {
+        bail!("existing Engine Library was modified; refusing to replace it");
+    }
+    for name in ["hm.db", "sm.db", "stm.db"] {
+        if companion_has_user_rows(&root.join("Database2").join(name))? {
+            bail!("existing Engine Library contains Engine-side data in {name}; refusing to replace it");
+        }
+    }
+    Ok(())
+}
+
+/// Return why an existing directory needs explicit replacement. Non-directory
+/// entries and interrupted swaps are never offered as replaceable.
+pub fn replacement_reason(target: &Path) -> Result<Option<String>> {
+    let root = target.join("Engine Library");
+    if entry_type(&target.join(PREVIOUS_LIBRARY))?.is_some() {
+        bail!("an interrupted Engine Library refresh needs recovery before replacement");
+    }
+    match entry_type(&root)? {
+        None => return Ok(None),
+        Some(kind) if !kind.is_dir() => bail!("Engine Library is not a directory"),
+        Some(_) => {}
+    }
+    Ok(validate_existing(target)
+        .err()
+        .map(|error| format!("{error:#}")))
+}
+
+pub fn validate_for_export(target: &Path, replace_existing: bool) -> Result<()> {
+    if replace_existing {
+        if entry_type(&target.join(PREVIOUS_LIBRARY))?.is_some() {
+            bail!("an interrupted Engine Library refresh needs recovery before replacement");
+        }
+        if entry_type(&target.join("Engine Library"))?.is_some_and(|kind| !kind.is_dir()) {
+            bail!("Engine Library is not a directory; refusing to replace it");
+        }
+        Ok(())
+    } else {
+        validate_existing(target)
+    }
 }
 
 fn artwork(plan: &Plan) -> Result<(String, HashMap<PathBuf, i64>, i64)> {
@@ -543,9 +652,8 @@ pub(crate) fn write_engine_with_hashes(
         bail!("one audio hash is required per track");
     }
     let root = plan.target.join("Engine Library");
-    if root.exists() {
-        bail!("Engine Library already exists");
-    }
+    validate_for_export(&plan.target, plan.replace_existing)?;
+    let previous = plan.target.join(PREVIOUS_LIBRARY);
     let stage = plan
         .target
         .join(format!(".rekordbox-to-engine-stage-{}", Uuid::new_v4()));
@@ -554,7 +662,7 @@ pub(crate) fn write_engine_with_hashes(
         let uuid = Uuid::new_v4().to_string();
         let database = stage.join("Database2");
         fs::create_dir_all(&database)?;
-        let (main_sql, warnings) = main_db_sql(plan, analyses, &uuid)?;
+        let (main_sql, mut warnings) = main_db_sql(plan, analyses, &uuid)?;
         sqlite_script(&database.join("m.db"), &main_sql)?;
         companion_db(&database.join("hm.db"), HISTORY_SCHEMA)?;
         companion_db(&database.join("sm.db"), SECONDARY_SCHEMA)?;
@@ -597,7 +705,24 @@ pub(crate) fn write_engine_with_hashes(
                 staged_report.issues
             );
         }
-        fs::rename(&stage, &root)?;
+        if entry_type(&root)?.is_some() {
+            fs::rename(&root, &previous)
+                .context("could not preserve the previous Engine Library")?;
+            if let Err(error) = fs::rename(&stage, &root) {
+                fs::rename(&previous, &root).context(
+                    "could not restore the previous Engine Library after publication failed",
+                )?;
+                return Err(error).context("could not publish the refreshed Engine Library");
+            }
+            if let Err(error) = fs::remove_dir_all(&previous) {
+                warnings.push(format!(
+                    "previous Engine Library remains at {}: {error}",
+                    previous.display()
+                ));
+            }
+        } else {
+            fs::rename(&stage, &root)?;
+        }
         Ok(ExportResult {
             engine_library: root,
             database_uuid: uuid,

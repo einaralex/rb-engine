@@ -61,3 +61,18 @@ fn nested_playlists_keep_rekordbox_depth_first_order() {
         vec!["Folder", "Child", "Sibling"]
     );
 }
+
+#[test]
+fn blank_optional_analysis_path_on_rbxport_export_is_absent() {
+    let usb = tempfile::tempdir().unwrap();
+    let media = usb.path().join("Contents/song.wav");
+    fs::create_dir_all(media.parent().unwrap()).unwrap();
+    fs::write(media, b"generated audio").unwrap();
+    let source: SourceLibrary = serde_json::from_value(json!({
+        "tracks": [{"content_id": 1, "path": "/Contents/song.wav", "analysisDataFilePath": ""}],
+        "playlists": [], "playlist_entries": []
+    }))
+    .unwrap();
+    let plan = build_plan(usb.path(), source).unwrap();
+    assert!(plan.tracks[0].anlz_path.is_none());
+}
