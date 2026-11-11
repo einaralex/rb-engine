@@ -141,9 +141,7 @@ pub fn build_plan(target: &Path, source: SourceLibrary) -> Result<Plan> {
     if !target.is_dir() {
         bail!("target must be a directory");
     }
-    if target.join("Engine Library").exists() {
-        bail!("target already contains Engine Library");
-    }
+    crate::engine::validate_existing(&target)?;
     let keys: BTreeMap<_, _> = source
         .keys
         .into_iter()

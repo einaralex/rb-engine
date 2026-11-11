@@ -17,6 +17,7 @@ use uuid::Uuid;
 const MAIN_SCHEMA: &str = include_str!("../sql/m.sql");
 const HISTORY_SCHEMA: &str = include_str!("../sql/hm.sql");
 const SECONDARY_SCHEMA: &str = include_str!("../sql/secondary.sql");
+const PREVIOUS_LIBRARY: &str = ".rekordbox-to-engine-previous";
 
 #[derive(Debug, Serialize)]
 pub struct ExportResult {
@@ -169,6 +170,78 @@ fn hash_file(path: &Path) -> Result<String> {
         hasher.update(&buf[..n]);
     }
     Ok(hex::encode(hasher.finalize()))
+}
+
+fn entry_type(path: &Path) -> Result<Option<fs::FileType>> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => Ok(Some(metadata.file_type())),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error).with_context(|| format!("cannot inspect {}", path.display())),
+    }
+}
+
+fn companion_has_user_rows(path: &Path) -> Result<bool> {
+    let db = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .with_context(|| format!("cannot inspect {}", path.display()))?;
+    let mut stmt = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT IN ('Information', 'sqlite_sequence')")?;
+    let names = stmt
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for name in names {
+        let escaped = name.replace('"', "\"\"");
+        let count: i64 =
+            db.query_row(&format!("SELECT COUNT(*) FROM \"{escaped}\""), [], |row| {
+                row.get(0)
+            })?;
+        if count != 0 {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Only a library created by this tool, with its main database unchanged,
+/// may be refreshed. An interrupted swap is recovered before planning.
+pub fn validate_existing(target: &Path) -> Result<()> {
+    let root = target.join("Engine Library");
+    let previous = target.join(PREVIOUS_LIBRARY);
+    if let Some(file_type) = entry_type(&previous)? {
+        if !file_type.is_dir() || entry_type(&root)?.is_some() {
+            bail!(
+                "an interrupted Engine Library refresh needs manual recovery: {}",
+                previous.display()
+            );
+        }
+        fs::rename(&previous, &root).context("could not restore the previous Engine Library")?;
+    }
+    let Some(file_type) = entry_type(&root)? else {
+        return Ok(());
+    };
+    if !file_type.is_dir() {
+        bail!("Engine Library is not a directory; refusing to replace it");
+    }
+    let state: serde_json::Value = serde_json::from_slice(
+        &fs::read(root.join(".engine-usb.json"))
+            .context("existing Engine Library is not managed by rekordbox-to-engine")?,
+    )
+    .context("existing Engine Library has an invalid management record")?;
+    if state["format"] != "engine-usb-v1" {
+        bail!("existing Engine Library has an unknown format; refusing to replace it");
+    }
+    let expected = state["database_sha256"]
+        .as_str()
+        .context("existing Engine Library has no database checksum")?;
+    let actual = hash_file(&root.join("Database2/m.db"))
+        .context("cannot read the existing Engine database")?;
+    if actual != expected {
+        bail!("existing Engine Library was modified; refusing to replace it");
+    }
+    for name in ["hm.db", "sm.db", "stm.db"] {
+        if companion_has_user_rows(&root.join("Database2").join(name))? {
+            bail!("existing Engine Library contains Engine-side data in {name}; refusing to replace it");
+        }
+    }
+    Ok(())
 }
 
 fn artwork(plan: &Plan) -> Result<(String, HashMap<PathBuf, i64>, i64)> {
@@ -548,9 +621,8 @@ pub(crate) fn write_engine_with_hashes(
         bail!("one audio hash is required per track");
     }
     let root = plan.target.join("Engine Library");
-    if root.exists() {
-        bail!("Engine Library already exists");
-    }
+    validate_existing(&plan.target)?;
+    let previous = plan.target.join(PREVIOUS_LIBRARY);
     let stage = plan
         .target
         .join(format!(".rekordbox-to-engine-stage-{}", Uuid::new_v4()));
@@ -559,7 +631,7 @@ pub(crate) fn write_engine_with_hashes(
         let uuid = Uuid::new_v4().to_string();
         let database = stage.join("Database2");
         fs::create_dir_all(&database)?;
-        let (main_sql, warnings) = main_db_sql(plan, analyses, &uuid)?;
+        let (main_sql, mut warnings) = main_db_sql(plan, analyses, &uuid)?;
         sqlite_script(&database.join("m.db"), &main_sql)?;
         companion_db(&database.join("hm.db"), HISTORY_SCHEMA)?;
         companion_db(&database.join("sm.db"), SECONDARY_SCHEMA)?;
@@ -602,7 +674,24 @@ pub(crate) fn write_engine_with_hashes(
                 staged_report.issues
             );
         }
-        fs::rename(&stage, &root)?;
+        if entry_type(&root)?.is_some() {
+            fs::rename(&root, &previous)
+                .context("could not preserve the previous Engine Library")?;
+            if let Err(error) = fs::rename(&stage, &root) {
+                fs::rename(&previous, &root).context(
+                    "could not restore the previous Engine Library after publication failed",
+                )?;
+                return Err(error).context("could not publish the refreshed Engine Library");
+            }
+            if let Err(error) = fs::remove_dir_all(&previous) {
+                warnings.push(format!(
+                    "previous Engine Library remains at {}: {error}",
+                    previous.display()
+                ));
+            }
+        } else {
+            fs::rename(&stage, &root)?;
+        }
         Ok(ExportResult {
             engine_library: root,
             database_uuid: uuid,
