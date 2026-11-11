@@ -43,7 +43,7 @@ pub fn prepare(plan: &Plan, analyzer: &dyn Analyzer, capture_root: &Path) -> Res
     if plan.tracks.is_empty() {
         bail!("Rekordbox USB has no tracks to analyze");
     }
-    crate::engine::validate_existing(&plan.target)?;
+    crate::engine::validate_for_export(&plan.target, plan.replace_existing)?;
     let parent = capture_root
         .parent()
         .context("capture output has no parent")?

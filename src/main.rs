@@ -1,7 +1,8 @@
 use anyhow::{bail, Context, Result};
 use clap::Parser;
 use rekordbox_to_engine::{
-    analyzer::OfflineAnalyzer, onelibrary::read_onelibrary, plan::build_plan, workflow::prepare,
+    analyzer::OfflineAnalyzer, onelibrary::read_onelibrary, plan::build_plan_with_options,
+    workflow::prepare,
 };
 use std::path::PathBuf;
 use std::time::Duration;
@@ -17,6 +18,8 @@ struct Args {
     target: PathBuf,
     #[arg(long)]
     dry_run: bool,
+    #[arg(long)]
+    replace_engine_library: bool,
     #[arg(
         long,
         default_value = "/Applications/Engine DJ.app/Contents/MacOS/OfflineAnalyzer"
@@ -41,7 +44,7 @@ fn main() -> Result<()> {
         bail!("expected exactly one modern Rekordbox exportLibrary.db");
     }
     let source = read_onelibrary(&modern[0])?;
-    let plan = build_plan(&root, source)?;
+    let plan = build_plan_with_options(&root, source, args.replace_engine_library)?;
     if args.dry_run {
         println!("{}", serde_json::to_string_pretty(&plan)?);
         return Ok(());

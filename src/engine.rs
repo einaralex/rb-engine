@@ -244,6 +244,37 @@ pub fn validate_existing(target: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Return why an existing directory needs explicit replacement. Non-directory
+/// entries and interrupted swaps are never offered as replaceable.
+pub fn replacement_reason(target: &Path) -> Result<Option<String>> {
+    let root = target.join("Engine Library");
+    if entry_type(&target.join(PREVIOUS_LIBRARY))?.is_some() {
+        bail!("an interrupted Engine Library refresh needs recovery before replacement");
+    }
+    match entry_type(&root)? {
+        None => return Ok(None),
+        Some(kind) if !kind.is_dir() => bail!("Engine Library is not a directory"),
+        Some(_) => {}
+    }
+    Ok(validate_existing(target)
+        .err()
+        .map(|error| format!("{error:#}")))
+}
+
+pub fn validate_for_export(target: &Path, replace_existing: bool) -> Result<()> {
+    if replace_existing {
+        if entry_type(&target.join(PREVIOUS_LIBRARY))?.is_some() {
+            bail!("an interrupted Engine Library refresh needs recovery before replacement");
+        }
+        if entry_type(&target.join("Engine Library"))?.is_some_and(|kind| !kind.is_dir()) {
+            bail!("Engine Library is not a directory; refusing to replace it");
+        }
+        Ok(())
+    } else {
+        validate_existing(target)
+    }
+}
+
 fn artwork(plan: &Plan) -> Result<(String, HashMap<PathBuf, i64>, i64)> {
     let mut rows = String::new();
     let mut ids = HashMap::new();
@@ -621,7 +652,7 @@ pub(crate) fn write_engine_with_hashes(
         bail!("one audio hash is required per track");
     }
     let root = plan.target.join("Engine Library");
-    validate_existing(&plan.target)?;
+    validate_for_export(&plan.target, plan.replace_existing)?;
     let previous = plan.target.join(PREVIOUS_LIBRARY);
     let stage = plan
         .target

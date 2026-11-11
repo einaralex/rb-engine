@@ -3,7 +3,7 @@ use rekordbox_to_engine::{
     analyzer::Analyzer,
     capture::{decode_stream, Analysis},
     engine::{validate_existing, verify_engine},
-    plan::{build_plan, SourceLibrary, TrackPlan},
+    plan::{build_plan, build_plan_with_options, SourceLibrary, TrackPlan},
     workflow::prepare,
 };
 use serde_json::json;
@@ -35,6 +35,14 @@ fn fixture_plan(target: &Path) -> rekordbox_to_engine::plan::Plan {
 }
 
 fn plan_with_tracks(target: &Path, ids: &[i64]) -> rekordbox_to_engine::plan::Plan {
+    plan_with_tracks_options(target, ids, false)
+}
+
+fn plan_with_tracks_options(
+    target: &Path,
+    ids: &[i64],
+    replace_existing: bool,
+) -> rekordbox_to_engine::plan::Plan {
     let tracks = ids
         .iter()
         .map(|id| {
@@ -50,7 +58,7 @@ fn plan_with_tracks(target: &Path, ids: &[i64]) -> rekordbox_to_engine::plan::Pl
         "playlists": [{"playlist_id": 1, "name": "Set", "attribute": 0, "playlist_id_parent": 0}],
         "playlist_entries": ids.iter().map(|id| json!({"playlist_id": 1, "content_id": id})).collect::<Vec<_>>()
     })).unwrap();
-    build_plan(target, source).unwrap()
+    build_plan_with_options(target, source, replace_existing).unwrap()
 }
 
 #[test]
@@ -243,4 +251,42 @@ fn refuses_to_discard_engine_side_history() {
         .unwrap_err()
         .to_string()
         .contains("Engine-side data"));
+}
+
+#[test]
+fn explicit_replacement_accepts_unmanaged_library() {
+    let usb = tempfile::tempdir().unwrap();
+    let captures = tempfile::tempdir().unwrap();
+    let old = usb.path().join("Engine Library");
+    fs::create_dir(&old).unwrap();
+    fs::write(old.join("player-notes"), b"old library").unwrap();
+    assert!(rekordbox_to_engine::engine::replacement_reason(usb.path())
+        .unwrap()
+        .is_some());
+    let plan = plan_with_tracks_options(usb.path(), &[1], true);
+    prepare(
+        &plan,
+        &FixtureAnalyzer { fail: false },
+        &captures.path().join("new"),
+    )
+    .unwrap();
+    assert!(verify_engine(usb.path()).unwrap().ok);
+    assert!(!old.join("player-notes").exists());
+}
+
+#[test]
+fn explicit_replacement_failure_preserves_unmanaged_library() {
+    let usb = tempfile::tempdir().unwrap();
+    let captures = tempfile::tempdir().unwrap();
+    let old = usb.path().join("Engine Library");
+    fs::create_dir(&old).unwrap();
+    fs::write(old.join("player-notes"), b"old library").unwrap();
+    let plan = plan_with_tracks_options(usb.path(), &[1], true);
+    assert!(prepare(
+        &plan,
+        &FixtureAnalyzer { fail: true },
+        &captures.path().join("new")
+    )
+    .is_err());
+    assert_eq!(fs::read(old.join("player-notes")).unwrap(), b"old library");
 }

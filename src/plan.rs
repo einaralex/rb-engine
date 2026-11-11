@@ -83,6 +83,7 @@ pub struct SourceImage {
 #[derive(Debug, Clone, Serialize)]
 pub struct Plan {
     pub target: PathBuf,
+    pub replace_existing: bool,
     pub min_tempo: u32,
     pub tracks: Vec<TrackPlan>,
     pub playlists: Vec<PlaylistPlan>,
@@ -137,11 +138,19 @@ pub fn usb_relative(raw: &str) -> Result<PathBuf> {
 }
 
 pub fn build_plan(target: &Path, source: SourceLibrary) -> Result<Plan> {
+    build_plan_with_options(target, source, false)
+}
+
+pub fn build_plan_with_options(
+    target: &Path,
+    source: SourceLibrary,
+    replace_existing: bool,
+) -> Result<Plan> {
     let target = target.canonicalize().context("target USB does not exist")?;
     if !target.is_dir() {
         bail!("target must be a directory");
     }
-    crate::engine::validate_existing(&target)?;
+    crate::engine::validate_for_export(&target, replace_existing)?;
     let keys: BTreeMap<_, _> = source
         .keys
         .into_iter()
@@ -297,6 +306,7 @@ pub fn build_plan(target: &Path, source: SourceLibrary) -> Result<Plan> {
     }
     Ok(Plan {
         target,
+        replace_existing,
         min_tempo: 88,
         tracks,
         playlists,

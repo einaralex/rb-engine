@@ -8,6 +8,15 @@ pub mod workflow;
 
 /// Prepare a verified Rekordbox USB export using the installed Engine DJ analyzer.
 pub fn prepare_usb(target: &std::path::Path) -> anyhow::Result<workflow::PrepareReport> {
+    prepare_usb_with_options(target, false)
+}
+
+/// Explicitly replace an existing Engine Library when `replace_existing` is true.
+/// Callers must obtain the user's consent before enabling replacement.
+pub fn prepare_usb_with_options(
+    target: &std::path::Path,
+    replace_existing: bool,
+) -> anyhow::Result<workflow::PrepareReport> {
     use anyhow::{bail, Context};
     use std::time::Duration;
 
@@ -23,7 +32,7 @@ pub fn prepare_usb(target: &std::path::Path) -> anyhow::Result<workflow::Prepare
         bail!("expected exactly one modern Rekordbox exportLibrary.db");
     }
     let source = onelibrary::read_onelibrary(&modern[0])?;
-    let plan = plan::build_plan(&root, source)?;
+    let plan = plan::build_plan_with_options(&root, source, replace_existing)?;
     let executable =
         std::path::PathBuf::from("/Applications/Engine DJ.app/Contents/MacOS/OfflineAnalyzer");
     if !executable.is_file() {
