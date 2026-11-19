@@ -4,10 +4,16 @@ use rekordbox_to_engine::{
     capture::{decode_stream, Analysis},
     engine::{validate_existing, verify_engine},
     plan::{build_plan, build_plan_with_options, SourceLibrary, TrackPlan},
-    workflow::prepare,
+    workflow::{prepare, prepare_with_jobs},
 };
 use serde_json::json;
-use std::{fs, path::Path};
+use std::{
+    fs,
+    path::Path,
+    sync::atomic::{AtomicUsize, Ordering},
+    thread,
+    time::Duration,
+};
 
 struct FixtureAnalyzer {
     fail: bool,
@@ -18,6 +24,22 @@ impl Analyzer for FixtureAnalyzer {
             bail!("fixture analyzer failure");
         }
         fs::create_dir(output)?;
+        decode_stream(include_bytes!("fixtures/plasma-received.bin"))
+    }
+}
+
+struct ConcurrencyAnalyzer {
+    active: AtomicUsize,
+    max_active: AtomicUsize,
+}
+
+impl Analyzer for ConcurrencyAnalyzer {
+    fn analyze(&self, _track: &TrackPlan, output: &Path) -> Result<Analysis> {
+        fs::create_dir(output)?;
+        let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+        self.max_active.fetch_max(active, Ordering::SeqCst);
+        thread::sleep(Duration::from_millis(60));
+        self.active.fetch_sub(1, Ordering::SeqCst);
         decode_stream(include_bytes!("fixtures/plasma-received.bin"))
     }
 }
@@ -88,6 +110,53 @@ fn analysis_failure_does_not_publish_engine_library() {
     )
     .is_err());
     assert!(!usb.path().join("Engine Library").exists());
+}
+
+#[test]
+fn parallel_analysis_respects_limit_and_preserves_track_order() {
+    let usb = tempfile::tempdir().unwrap();
+    let captures = tempfile::tempdir().unwrap();
+    let plan = plan_with_tracks(usb.path(), &[1, 2, 3, 4]);
+    let analyzer = ConcurrencyAnalyzer {
+        active: AtomicUsize::new(0),
+        max_active: AtomicUsize::new(0),
+    };
+    let report = prepare_with_jobs(&plan, &analyzer, &captures.path().join("new"), 2).unwrap();
+    assert_eq!(analyzer.max_active.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        report
+            .analysis
+            .iter()
+            .map(|track| track.content_id)
+            .collect::<Vec<_>>(),
+        vec![1, 2, 3, 4]
+    );
+    assert!(report.verification.ok);
+}
+
+#[test]
+fn default_workflow_runs_four_analyses_at_once() {
+    let usb = tempfile::tempdir().unwrap();
+    let captures = tempfile::tempdir().unwrap();
+    let plan = plan_with_tracks(usb.path(), &[1, 2, 3, 4]);
+    let analyzer = ConcurrencyAnalyzer {
+        active: AtomicUsize::new(0),
+        max_active: AtomicUsize::new(0),
+    };
+    let report = prepare(&plan, &analyzer, &captures.path().join("new")).unwrap();
+    assert_eq!(analyzer.max_active.load(Ordering::SeqCst), 4);
+    assert!(report.verification.ok);
+}
+
+#[test]
+fn zero_jobs_is_rejected_before_creating_capture_directory() {
+    let usb = tempfile::tempdir().unwrap();
+    let captures = tempfile::tempdir().unwrap();
+    let plan = fixture_plan(usb.path());
+    let output = captures.path().join("new");
+    let error = prepare_with_jobs(&plan, &FixtureAnalyzer { fail: false }, &output, 0).unwrap_err();
+    assert!(error.to_string().contains("at least one"));
+    assert!(!output.exists());
 }
 
 #[test]

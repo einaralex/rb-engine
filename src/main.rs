@@ -2,7 +2,7 @@ use anyhow::{bail, Context, Result};
 use clap::Parser;
 use rekordbox_to_engine::{
     analyzer::OfflineAnalyzer, onelibrary::read_onelibrary, plan::build_plan_with_options,
-    workflow::prepare,
+    workflow::prepare_with_jobs,
 };
 use std::path::PathBuf;
 use std::time::Duration;
@@ -27,6 +27,8 @@ struct Args {
     analyzer: PathBuf,
     #[arg(long)]
     capture_output_dir: Option<PathBuf>,
+    #[arg(long, default_value_t = 4, help = "Maximum concurrent track analyses")]
+    jobs: usize,
 }
 
 fn main() -> Result<()> {
@@ -63,7 +65,7 @@ fn main() -> Result<()> {
     let captures = args.capture_output_dir.unwrap_or_else(|| {
         std::env::temp_dir().join(format!("rekordbox-to-engine-captures-{}", Uuid::new_v4()))
     });
-    let report = prepare(&plan, &analyzer, &captures)?;
+    let report = prepare_with_jobs(&plan, &analyzer, &captures, args.jobs)?;
     println!("{}", serde_json::to_string_pretty(&report)?);
     Ok(())
 }
