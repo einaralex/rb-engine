@@ -142,6 +142,8 @@ mod macos {
             parallel_samples,
             captured_sample_counts(&captures.path().join("serial"))
         );
-        eprintln!("4 tracks: parallel {parallel_time:?}, serial {serial_time:?}");
+        eprintln!(
+            "4 tracks: parallel fresh export {parallel_time:?}, serial refresh {serial_time:?}"
+        );
     }
 }

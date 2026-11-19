@@ -58,7 +58,7 @@ To check four concurrent `OfflineAnalyzer` processes and a serial repeat export 
 cargo test --offline --test live_parallel -- --ignored --nocapture
 ```
 
-The test prints both analysis times. It does not access a physical USB.
+The test prints both preparation times. It does not access a physical USB.
 
 ## Current limits
 
