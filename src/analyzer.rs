@@ -9,7 +9,7 @@ use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
-/// One track per call. A cache or worker pool can implement this interface later.
+/// One track per call. Implementations must support concurrent calls.
 pub trait Analyzer: Send + Sync {
     fn analyze(&self, track: &TrackPlan, output: &Path) -> Result<Analysis>;
 }
